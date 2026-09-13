@@ -9,11 +9,10 @@ from streamlit_autorefresh import st_autorefresh
 import yaml
 
 # ---------------------------------------------------------
-# Page Configuration & Compact Styling
+# Page Configuration & Clean Styling
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Sleeper Live Command Center",
-    page_icon="🏈",
+    page_title="Ric's Fantasy Football Command Center",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -43,7 +42,6 @@ st.markdown(
         border-radius: 8px;
         padding: 14px 18px;
         margin-bottom: 12px;
-        transition: transform 0.15s ease-in-out;
     }
     .game-card {
         background-color: #161B22;
@@ -68,10 +66,50 @@ st.markdown(
         border-left: 3px solid #DA3633;
         font-size: 0.92rem;
     }
+
+    /* T-Chart Roster Slot Styling */
+    .roster-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        margin-bottom: 6px;
+        background-color: #161B22;
+        border: 1px solid #30363D;
+        border-radius: 6px;
+        min-height: 48px;
+    }
+    .pos-badge {
+        font-weight: bold;
+        font-size: 0.75rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background-color: #21262D;
+        color: #58A6FF;
+        border: 1px solid #30363D;
+        margin-right: 8px;
+    }
+    .status-badge {
+        font-size: 0.72rem;
+        padding: 1px 6px;
+        border-radius: 10px;
+        font-weight: 600;
+    }
     </style>
 """,
     unsafe_allow_html=True,
 )
+
+# Persistent HTTP Session for fast connection reuse
+@st.cache_resource
+def get_http_session():
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+http = get_http_session()
 
 # ---------------------------------------------------------
 # Session State Initialization
@@ -89,7 +127,7 @@ if "score_history" not in st.session_state:
 # ---------------------------------------------------------
 # Configuration Loader
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def load_config(config_path="config.yaml"):
     if not os.path.exists(config_path):
         return None
@@ -99,18 +137,18 @@ def load_config(config_path="config.yaml"):
 
 config = load_config()
 if not config:
-    st.error("⚠️ `config.yaml` not found. Please place it in the root directory.")
+    st.error("config.yaml not found. Please place it in the root directory.")
     st.stop()
 
 
 # ---------------------------------------------------------
 # API Fetchers
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_current_nfl_state():
     url = "https://api.sleeper.app/v1/state/nfl"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = http.get(url, timeout=5)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -122,7 +160,7 @@ def get_current_nfl_state():
 def get_nfl_players():
     url = "https://api.sleeper.app/v1/players/nfl"
     try:
-        resp = requests.get(url, timeout=15)
+        resp = http.get(url, timeout=15)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -134,7 +172,7 @@ def get_nfl_players():
 def get_user_id(username: str):
     url = f"https://api.sleeper.app/v1/user/{username.strip()}"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = http.get(url, timeout=5)
         if resp.status_code == 200:
             return resp.json().get("user_id")
     except Exception:
@@ -142,11 +180,11 @@ def get_user_id(username: str):
     return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_roster_id(league_id: str, user_id: str):
     url = f"https://api.sleeper.app/v1/league/{league_id}/rosters"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = http.get(url, timeout=5)
         if resp.status_code == 200:
             rosters = resp.json()
             for r in rosters:
@@ -159,21 +197,27 @@ def get_roster_id(league_id: str, user_id: str):
     return None
 
 
-@st.cache_data(ttl=1800)
-def get_league_team_names(league_id: str):
-    """Fetches custom team names for each roster in a league."""
+@st.cache_data(ttl=600)
+def get_league_metadata(league_id: str):
+    """Fetches custom team names and roster slot positions."""
     rosters_url = f"https://api.sleeper.app/v1/league/{league_id}/rosters"
     users_url = f"https://api.sleeper.app/v1/league/{league_id}/users"
-    try:
-        rosters_resp = requests.get(rosters_url, timeout=10)
-        users_resp = requests.get(users_url, timeout=10)
+    league_url = f"https://api.sleeper.app/v1/league/{league_id}"
 
-        user_map = {}
-        if users_resp.status_code == 200:
-            for u in users_resp.json():
+    user_map = {}
+    roster_map = {}
+    roster_positions = []
+
+    try:
+        l_resp = http.get(league_url, timeout=5)
+        if l_resp.status_code == 200:
+            roster_positions = l_resp.json().get("roster_positions", [])
+
+        u_resp = http.get(users_url, timeout=5)
+        if u_resp.status_code == 200:
+            for u in u_resp.json():
                 uid = u.get("user_id")
                 meta = u.get("metadata") or {}
-                # Custom team name takes priority, fallback to display name / username
                 team_name = (
                     meta.get("team_name")
                     or u.get("display_name")
@@ -182,26 +226,25 @@ def get_league_team_names(league_id: str):
                 if uid and team_name:
                     user_map[uid] = team_name.strip()
 
-        roster_map = {}
-        if rosters_resp.status_code == 200:
-            for r in rosters_resp.json():
+        r_resp = http.get(rosters_url, timeout=5)
+        if r_resp.status_code == 200:
+            for r in r_resp.json():
                 rid = r.get("roster_id")
                 oid = r.get("owner_id")
                 r_meta = r.get("metadata") or {}
-                name = user_map.get(oid) or r_meta.get(
-                    "team_name", f"Team {rid}"
-                )
+                name = user_map.get(oid) or r_meta.get("team_name", f"Team {rid}")
                 roster_map[rid] = name
 
-        return roster_map
+        return roster_map, roster_positions
     except Exception:
-        return {}
+        return {}, []
 
 
 def get_league_matchups(league_id: str, week: int):
+    """Zero-caching: strictly live points query on each poll."""
     url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{week}"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = http.get(url, timeout=5)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -210,9 +253,10 @@ def get_league_matchups(league_id: str, week: int):
 
 
 def get_espn_nfl_scoreboard():
+    """Zero-caching: strictly live ESPN scoreboard query on each poll."""
     url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = http.get(url, timeout=5)
         if resp.status_code == 200:
             return resp.json().get("events", [])
     except Exception:
@@ -245,17 +289,15 @@ default_week = (
     else api_detected_week
 )
 
-st.sidebar.title("🏈 Status & Controls")
-st.sidebar.markdown(
-    f"**NFL Season:** `{nfl_state.get('season', '')}` ({season_type})"
-)
+st.sidebar.title("Status and Controls")
+st.sidebar.markdown(f"**NFL Season:** `{nfl_state.get('season', '')}` ({season_type})")
 st.sidebar.markdown(f"**Detected Week:** `Week {api_detected_week}`")
 
 current_week = st.sidebar.number_input(
     "Active Matchup Week", min_value=1, max_value=18, value=int(default_week)
 )
 
-refresh_interval = config.get("app", {}).get("refresh_interval_seconds", 20)
+refresh_interval = config.get("app", {}).get("refresh_interval_seconds", 15)
 enable_polling = st.sidebar.checkbox("Enable Live Polling", value=True)
 
 if enable_polling:
@@ -274,7 +316,7 @@ username = config.get("sleeper", {}).get("username")
 leagues_cfg = config.get("sleeper", {}).get("leagues", [])
 
 if not username or not leagues_cfg:
-    st.warning("Please configure `username` and leagues in `config.yaml`.")
+    st.warning("Please configure username and leagues in config.yaml.")
     st.stop()
 
 all_players = get_nfl_players()
@@ -282,6 +324,16 @@ user_id = get_user_id(username)
 if not user_id:
     st.error(f"Could not verify Sleeper user '{username}'.")
     st.stop()
+
+espn_events = get_espn_nfl_scoreboard()
+
+# Build map of NFL live game statuses
+nfl_game_status = {}
+for ev in espn_events:
+    state = ev["status"]["type"]["state"]  # "pre", "in", "post"
+    for comp in ev["competitions"][0]["competitors"]:
+        abbr = normalize_team(comp["team"]["abbreviation"])
+        nfl_game_status[abbr] = state
 
 all_my_starters = []
 league_summaries = []
@@ -295,8 +347,7 @@ for l_cfg in leagues_cfg:
     if not roster_id:
         continue
 
-    # Retrieve custom fantasy team names for this league
-    team_names = get_league_team_names(lid)
+    team_names, roster_positions = get_league_metadata(lid)
     my_team_name = team_names.get(roster_id, username)
 
     matchups = get_league_matchups(lid, current_week)
@@ -355,6 +406,9 @@ for l_cfg in leagues_cfg:
             "my_score": my_score,
             "opp_score": opp_score,
             "margin": margin,
+            "my_matchup": my_matchup,
+            "opp_matchup": opp_matchup,
+            "roster_positions": roster_positions,
         }
     )
 
@@ -402,9 +456,9 @@ for l_cfg in leagues_cfg:
             )
 
 # ---------------------------------------------------------
-# Dynamic Top Matchup Cards (Green when winning, Red when losing)
+# Dynamic Top Matchup Cards
 # ---------------------------------------------------------
-st.title(f"🏈 Sleeper Command Center — Week {current_week}")
+st.title(f"Ric's Fantasy Football Command Center - Week {current_week}")
 
 cols = st.columns(len(league_summaries) if league_summaries else 1)
 for idx, summary in enumerate(league_summaries):
@@ -414,7 +468,7 @@ for idx, summary in enumerate(league_summaries):
 
     if is_winning:
         status_text = "WINNING"
-        accent_color = "#2EA043"  # Vibrant Green
+        accent_color = "#2EA043"  # Green
         badge_bg = "rgba(46, 160, 67, 0.18)"
         margin_sign = f"+{margin}"
     elif is_tied:
@@ -424,7 +478,7 @@ for idx, summary in enumerate(league_summaries):
         margin_sign = "0.0"
     else:
         status_text = "LOSING"
-        accent_color = "#F85149"  # Vibrant Red
+        accent_color = "#F85149"  # Red
         badge_bg = "rgba(248, 81, 73, 0.18)"
         margin_sign = f"{margin}"
 
@@ -460,7 +514,7 @@ st.divider()
 # ---------------------------------------------------------
 # Tabbed Navigation
 # ---------------------------------------------------------
-tab_live, tab_charts = st.tabs(["🔴 Live Dashboard", "📈 Matchup Points Over Time"])
+tab_live, tab_charts = st.tabs(["Live Dashboard", "Matchup T-Chart and Score History"])
 
 # =========================================================
 # TAB 1: LIVE DASHBOARD
@@ -469,7 +523,7 @@ with tab_live:
     col_games, col_feed = st.columns([6, 5], gap="large")
 
     with col_games:
-        st.subheader("📺 What NFL Game to Watch")
+        st.subheader("What NFL Game to Watch")
         st.caption("Ranked by active fantasy starters across your matchups")
 
         espn_events = get_espn_nfl_scoreboard()
@@ -536,7 +590,7 @@ with tab_live:
             st.write("No active NFL games on the scoreboard.")
         else:
             for idx, g in enumerate(ranked_games):
-                badge = "🔴 LIVE" if g["is_live"] else f"⏱ {g['status']}"
+                badge = "LIVE" if g["is_live"] else f"{g['status']}"
                 priority_color = (
                     "#38B6FF" if g["my_players"] > 0 else "#8B949E"
                 )
@@ -549,8 +603,8 @@ with tab_live:
                             <span style="font-size: 0.85rem; font-weight: bold;">{badge}</span>
                         </div>
                         <div style="margin-top: 6px; font-size: 0.9rem; color: #C9D1D9;">
-                            ⭐ <strong>{g['my_players']}</strong> of your starters &nbsp;|&nbsp; 
-                            ⚠️ <strong>{g['opp_players']}</strong> opponent starters
+                            <strong>{g['my_players']}</strong> of your starters &nbsp;|&nbsp; 
+                            <strong>{g['opp_players']}</strong> opponent starters
                         </div>
                     </div>
                 """,
@@ -558,7 +612,7 @@ with tab_live:
                 )
 
     with col_feed:
-        st.subheader("⚡ Live Points Feed")
+        st.subheader("Live Points Feed")
         st.caption("Point deltas detected across your active rosters")
 
         if not st.session_state.live_feed:
@@ -592,88 +646,215 @@ with tab_live:
                 )
 
 # =========================================================
-# TAB 2: POINTS OVER TIME LINE CHARTS
+# TAB 2: T-CHART (FIRST) & POINTS OVER TIME (SECOND)
 # =========================================================
 with tab_charts:
-    st.subheader("📈 Matchup Scoring Progression Over Time")
-    st.caption(
-        "Live cumulative score curves for both teams (Y-axis positioned on the right)"
-    )
+    st.subheader("Matchup Starters and Score Progression")
+    st.caption("Side-by-side roster T-Chart followed by live score curves")
 
     if not league_summaries:
         st.info("No active league matchups found.")
     else:
         league_tabs = st.tabs([s["league_name"] for s in league_summaries])
 
+        def render_player_slot(slot_name, pid, points_map):
+            """Helper function to render a styled player box for the T-Chart."""
+            if not pid or pid == "0":
+                return f"""
+                <div class="roster-row" style="opacity: 0.5;">
+                    <div><span class="pos-badge">{slot_name}</span> Empty</div>
+                    <strong>0.00</strong>
+                </div>
+                """
+
+            p_data = all_players.get(str(pid), {})
+            p_name = p_data.get("full_name", f"Player {pid}")
+            team = normalize_team(p_data.get("team", "FA"))
+            pts = float(points_map.get(str(pid), 0.0))
+
+            game_state = nfl_game_status.get(team, "pre")
+            if game_state == "in":
+                badge_html = '<span class="status-badge" style="background: rgba(248, 81, 73, 0.2); color: #F85149; border: 1px solid #F85149;">LIVE</span>'
+            elif game_state == "post":
+                badge_html = '<span class="status-badge" style="background: rgba(139, 148, 158, 0.2); color: #8B949E;">FINAL</span>'
+            else:
+                badge_html = '<span class="status-badge" style="background: rgba(56, 182, 255, 0.15); color: #38B6FF;">PRE</span>'
+
+            return f"""
+            <div class="roster-row">
+                <div style="display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    <span class="pos-badge">{slot_name}</span>
+                    <span style="font-weight: 500; font-size: 0.92rem; color: #F0F6FC; margin-right: 6px;">{p_name}</span>
+                    <span style="font-size: 0.78rem; color: #8B949E; margin-right: 6px;">{team}</span>
+                    {badge_html}
+                </div>
+                <div style="font-weight: bold; font-size: 1rem; color: #F0F6FC; min-width: 45px; text-align: right;">
+                    {pts:.2f}
+                </div>
+            </div>
+            """
+
         for idx, summary in enumerate(league_summaries):
             lid = summary["league_id"]
             opp_name = summary["opp_team_name"]
+            my_team_name = summary["my_team_name"]
+
             with league_tabs[idx]:
                 league_history = st.session_state.score_history.get(lid, [])
 
-                if not league_history:
-                    st.info("Collecting polling records to plot score lines...")
-                    continue
-
-                df = pd.DataFrame(league_history)
-
-                # Metric highlight row
+                # Top Metrics
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Your Score", f"{summary['my_score']} pts")
-                m2.metric(f"{opp_name} (Opponent)", f"{summary['opp_score']} pts")
+                m1.metric(f"{my_team_name} (You)", f"{summary['my_score']} pts")
+                m2.metric(f"{opp_name}", f"{summary['opp_score']} pts")
                 m3.metric("Current Margin", f"{summary['margin']:+} pts")
 
-                fig = go.Figure()
+                # 1. STARTERS BOX SCORE (T-CHART) - PLACED FIRST
+                st.markdown("#### Starters Box Score (T-Chart)")
 
-                # User Team Score Line
-                fig.add_trace(
-                    go.Scatter(
-                        x=df["time"],
-                        y=df["my_score"],
-                        mode="lines+markers",
-                        name="My Team",
-                        line=dict(color="#38B6FF", width=3),
-                        marker=dict(size=6),
-                        hovertemplate="<b>My Team</b>: %{y:.2f} pts<br>Time: %{x}<extra></extra>",
+                my_matchup = summary["my_matchup"]
+                opp_matchup = summary["opp_matchup"]
+
+                my_starters_list = my_matchup.get("starters") or []
+                opp_starters_list = (
+                    opp_matchup.get("starters") if opp_matchup else []
+                ) or []
+
+                my_pts_map = my_matchup.get("players_points") or {}
+                opp_pts_map = (
+                    opp_matchup.get("players_points") if opp_matchup else {}
+                ) or {}
+
+                pos_slots = [
+                    p for p in summary.get("roster_positions", []) if p != "BN"
+                ]
+                total_slots = max(
+                    len(pos_slots),
+                    len(my_starters_list),
+                    len(opp_starters_list),
+                )
+
+                col_left, col_divider, col_right = st.columns([12, 1, 12])
+
+                with col_left:
+                    st.markdown(
+                        f"""
+                        <div style="border-bottom: 2px solid #38B6FF; padding-bottom: 6px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: baseline;">
+                            <h4 style="margin: 0; color: #38B6FF;">{my_team_name} (You)</h4>
+                            <span style="font-size: 1.1rem; font-weight: bold; color: #F0F6FC;">{summary['my_score']} pts</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
-                )
 
-                # Opponent Team Score Line (labeled with their actual team name)
-                fig.add_trace(
-                    go.Scatter(
-                        x=df["time"],
-                        y=df["opp_score"],
-                        mode="lines+markers",
-                        name=opp_name,
-                        line=dict(color="#F85149", width=2, dash="dash"),
-                        marker=dict(size=6),
-                        hovertemplate=f"<b>{opp_name}</b>: %{{y:.2f}} pts<br>Time: %{{x}}<extra></extra>",
+                with col_right:
+                    st.markdown(
+                        f"""
+                        <div style="border-bottom: 2px solid #F85149; padding-bottom: 6px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: baseline;">
+                            <h4 style="margin: 0; color: #F85149;">{opp_name}</h4>
+                            <span style="font-size: 1.1rem; font-weight: bold; color: #F0F6FC;">{summary['opp_score']} pts</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
-                )
 
-                fig.update_layout(
-                    title=f"{summary['league_name']}: You vs. {opp_name}",
-                    template="plotly_dark",
-                    height=420,
-                    xaxis=dict(
-                        title="Time",
-                        showgrid=True,
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                    ),
-                    yaxis=dict(
-                        title="Fantasy Points",
-                        side="right",
-                        showgrid=True,
-                        gridcolor="rgba(255, 255, 255, 0.1)",
-                    ),
-                    legend=dict(
-                        orientation="h",
-                        yanchor="bottom",
-                        y=1.02,
-                        xanchor="right",
-                        x=1,
-                    ),
-                    margin=dict(l=20, r=40, t=50, b=30),
-                )
+                with col_divider:
+                    st.markdown(
+                        """
+                        <div style="height: 100%; border-left: 1px solid #30363D; margin: 0 auto; min-height: 400px;"></div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-                st.plotly_chart(fig, use_container_width=True)
+                for slot_idx in range(total_slots):
+                    slot_name = (
+                        pos_slots[slot_idx]
+                        if slot_idx < len(pos_slots)
+                        else "FLEX"
+                    )
+
+                    my_pid = (
+                        my_starters_list[slot_idx]
+                        if slot_idx < len(my_starters_list)
+                        else None
+                    )
+                    opp_pid = (
+                        opp_starters_list[slot_idx]
+                        if slot_idx < len(opp_starters_list)
+                        else None
+                    )
+
+                    with col_left:
+                        st.markdown(
+                            render_player_slot(
+                                slot_name, my_pid, my_pts_map
+                            ),
+                            unsafe_allow_html=True,
+                        )
+
+                    with col_right:
+                        st.markdown(
+                            render_player_slot(
+                                slot_name, opp_pid, opp_pts_map
+                            ),
+                            unsafe_allow_html=True,
+                        )
+
+                st.divider()
+
+                # 2. POINTS OVER TIME LINE CHART - PLACED SECOND
+                st.markdown("#### Score Progression Over Time")
+                if league_history:
+                    df = pd.DataFrame(league_history)
+                    fig = go.Figure()
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["time"],
+                            y=df["my_score"],
+                            mode="lines+markers",
+                            name=my_team_name,
+                            line=dict(color="#38B6FF", width=3),
+                            marker=dict(size=6),
+                            hovertemplate=f"<b>{my_team_name}</b>: %{{y:.2f}} pts<br>Time: %{{x}}<extra></extra>",
+                        )
+                    )
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["time"],
+                            y=df["opp_score"],
+                            mode="lines+markers",
+                            name=opp_name,
+                            line=dict(color="#F85149", width=2, dash="dash"),
+                            marker=dict(size=6),
+                            hovertemplate=f"<b>{opp_name}</b>: %{{y:.2f}} pts<br>Time: %{{x}}<extra></extra>",
+                        )
+                    )
+
+                    fig.update_layout(
+                        title=f"{summary['league_name']}: Cumulative Points",
+                        template="plotly_dark",
+                        height=360,
+                        xaxis=dict(
+                            title="Time",
+                            showgrid=True,
+                            gridcolor="rgba(255, 255, 255, 0.1)",
+                        ),
+                        yaxis=dict(
+                            title="Fantasy Points",
+                            side="right",
+                            showgrid=True,
+                            gridcolor="rgba(255, 255, 255, 0.1)",
+                        ),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1,
+                        ),
+                        margin=dict(l=20, r=40, t=40, b=20),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Collecting polling records to plot score lines...")
