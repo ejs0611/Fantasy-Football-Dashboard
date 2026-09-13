@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 import yaml
 
 # ---------------------------------------------------------
-# Page Configuration & Styling
+# Page Configuration & Compact Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Sleeper Live Command Center",
@@ -18,38 +18,32 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-
 st.markdown(
     """
     <style>
-    /* 1. Remove the large default padding at the top of the app */
+    /* Remove large top whitespace */
     .block-container {
-        padding-top: 1rem !important;
+        padding-top: 1.2rem !important;
         padding-bottom: 2rem !important;
-        padding-left: 3rem !important;
-        padding-right: 3rem !important;
+        padding-left: 2.5rem !important;
+        padding-right: 2.5rem !important;
     }
-
-    /* 2. Collapse the top Streamlit header bar height */
     header[data-testid="stHeader"] {
         height: 2rem !important;
         background: transparent !important;
     }
-
-    /* 3. Pull the main title up closer to the top edge */
     h1 {
-        margin-top: -1rem !important;
+        margin-top: -0.8rem !important;
         padding-top: 0rem !important;
+        font-size: 2rem !important;
     }
 
-    /* Existing component styles */
-    .metric-card {
-        background-color: #1E222D;
+    /* Live Game & Status Cards */
+    .matchup-card {
         border-radius: 8px;
-        padding: 12px 16px;
-        border-left: 4px solid #38B6FF;
-        margin-bottom: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+        transition: transform 0.15s ease-in-out;
     }
     .game-card {
         background-color: #161B22;
@@ -88,7 +82,6 @@ if "previous_scores" not in st.session_state:
 if "live_feed" not in st.session_state:
     st.session_state.live_feed = []
 
-# Tracks point progression: { league_id: [ {"time": str, "my_score": float, "opp_score": float, "margin": float} ] }
 if "score_history" not in st.session_state:
     st.session_state.score_history = defaultdict(list)
 
@@ -164,6 +157,45 @@ def get_roster_id(league_id: str, user_id: str):
     except Exception:
         pass
     return None
+
+
+@st.cache_data(ttl=1800)
+def get_league_team_names(league_id: str):
+    """Fetches custom team names for each roster in a league."""
+    rosters_url = f"https://api.sleeper.app/v1/league/{league_id}/rosters"
+    users_url = f"https://api.sleeper.app/v1/league/{league_id}/users"
+    try:
+        rosters_resp = requests.get(rosters_url, timeout=10)
+        users_resp = requests.get(users_url, timeout=10)
+
+        user_map = {}
+        if users_resp.status_code == 200:
+            for u in users_resp.json():
+                uid = u.get("user_id")
+                meta = u.get("metadata") or {}
+                # Custom team name takes priority, fallback to display name / username
+                team_name = (
+                    meta.get("team_name")
+                    or u.get("display_name")
+                    or u.get("username")
+                )
+                if uid and team_name:
+                    user_map[uid] = team_name.strip()
+
+        roster_map = {}
+        if rosters_resp.status_code == 200:
+            for r in rosters_resp.json():
+                rid = r.get("roster_id")
+                oid = r.get("owner_id")
+                r_meta = r.get("metadata") or {}
+                name = user_map.get(oid) or r_meta.get(
+                    "team_name", f"Team {rid}"
+                )
+                roster_map[rid] = name
+
+        return roster_map
+    except Exception:
+        return {}
 
 
 def get_league_matchups(league_id: str, week: int):
@@ -263,6 +295,10 @@ for l_cfg in leagues_cfg:
     if not roster_id:
         continue
 
+    # Retrieve custom fantasy team names for this league
+    team_names = get_league_team_names(lid)
+    my_team_name = team_names.get(roster_id, username)
+
     matchups = get_league_matchups(lid, current_week)
     if not matchups:
         continue
@@ -281,11 +317,18 @@ for l_cfg in leagues_cfg:
         None,
     )
 
+    opp_roster_id = opp_matchup.get("roster_id") if opp_matchup else None
+    opp_team_name = (
+        team_names.get(opp_roster_id, f"Team {opp_roster_id}")
+        if opp_roster_id
+        else "No Opponent"
+    )
+
     my_score = round(my_matchup.get("points", 0.0), 2)
     opp_score = round(opp_matchup.get("points", 0.0), 2) if opp_matchup else 0.0
     margin = round(my_score - opp_score, 2)
 
-    # Record historical score point for line chart (only on change or first entry)
+    # Record historical score point for line chart
     history = st.session_state.score_history[lid]
     if (
         not history
@@ -299,6 +342,7 @@ for l_cfg in leagues_cfg:
                 "opp_score": opp_score,
                 "margin": margin,
                 "league_name": league_name,
+                "opp_team_name": opp_team_name,
             }
         )
 
@@ -306,6 +350,8 @@ for l_cfg in leagues_cfg:
         {
             "league_id": lid,
             "league_name": league_name,
+            "my_team_name": my_team_name,
+            "opp_team_name": opp_team_name,
             "my_score": my_score,
             "opp_score": opp_score,
             "margin": margin,
@@ -356,19 +402,57 @@ for l_cfg in leagues_cfg:
             )
 
 # ---------------------------------------------------------
-# Top Summary Metrics
+# Dynamic Top Matchup Cards (Green when winning, Red when losing)
 # ---------------------------------------------------------
 st.title(f"🏈 Sleeper Command Center — Week {current_week}")
 
 cols = st.columns(len(league_summaries) if league_summaries else 1)
 for idx, summary in enumerate(league_summaries):
+    margin = summary["margin"]
+    is_winning = margin > 0
+    is_tied = margin == 0
+
+    if is_winning:
+        status_text = "WINNING"
+        accent_color = "#2EA043"  # Vibrant Green
+        badge_bg = "rgba(46, 160, 67, 0.18)"
+        margin_sign = f"+{margin}"
+    elif is_tied:
+        status_text = "TIED"
+        accent_color = "#D29922"  # Amber
+        badge_bg = "rgba(210, 153, 34, 0.18)"
+        margin_sign = "0.0"
+    else:
+        status_text = "LOSING"
+        accent_color = "#F85149"  # Vibrant Red
+        badge_bg = "rgba(248, 81, 73, 0.18)"
+        margin_sign = f"{margin}"
+
     with cols[idx]:
-        delta_color = "normal" if summary["margin"] >= 0 else "inverse"
-        st.metric(
-            label=summary["league_name"],
-            value=f"{summary['my_score']} pts",
-            delta=f"{summary['margin']:+} vs Opp ({summary['opp_score']} pts)",
-            delta_color=delta_color,
+        st.markdown(
+            f"""
+            <div class="matchup-card" style="background-color: #161B22; border: 1px solid #30363D; border-left: 5px solid {accent_color};">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: 600; font-size: 0.95rem; color: #8B949E;">{summary['league_name']}</span>
+                    <span style="background-color: {badge_bg}; color: {accent_color}; font-weight: bold; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px; border: 1px solid {accent_color};">
+                        {status_text}
+                    </span>
+                </div>
+                <div style="margin-top: 8px; display: flex; justify-content: space-between; align-items: baseline;">
+                    <div>
+                        <span style="font-size: 1.6rem; font-weight: bold; color: #F0F6FC;">{summary['my_score']}</span>
+                        <span style="font-size: 0.85rem; color: #8B949E;">pts</span>
+                    </div>
+                    <div style="font-size: 0.95rem; font-weight: 600; color: {accent_color};">
+                        {margin_sign} pts
+                    </div>
+                </div>
+                <div style="margin-top: 6px; font-size: 0.82rem; color: #8B949E; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    vs <strong style="color: #C9D1D9;">{summary['opp_team_name']}</strong> ({summary['opp_score']} pts)
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 st.divider()
@@ -523,6 +607,7 @@ with tab_charts:
 
         for idx, summary in enumerate(league_summaries):
             lid = summary["league_id"]
+            opp_name = summary["opp_team_name"]
             with league_tabs[idx]:
                 league_history = st.session_state.score_history.get(lid, [])
 
@@ -534,14 +619,13 @@ with tab_charts:
 
                 # Metric highlight row
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Your Current Score", f"{summary['my_score']} pts")
-                m2.metric("Opponent Score", f"{summary['opp_score']} pts")
+                m1.metric("Your Score", f"{summary['my_score']} pts")
+                m2.metric(f"{opp_name} (Opponent)", f"{summary['opp_score']} pts")
                 m3.metric("Current Margin", f"{summary['margin']:+} pts")
 
-                # Build line chart for both teams
                 fig = go.Figure()
 
-                # User's Team Score Line
+                # User Team Score Line
                 fig.add_trace(
                     go.Scatter(
                         x=df["time"],
@@ -554,22 +638,21 @@ with tab_charts:
                     )
                 )
 
-                # Opponent's Team Score Line
+                # Opponent Team Score Line (labeled with their actual team name)
                 fig.add_trace(
                     go.Scatter(
                         x=df["time"],
                         y=df["opp_score"],
                         mode="lines+markers",
-                        name="Opponent",
+                        name=opp_name,
                         line=dict(color="#F85149", width=2, dash="dash"),
                         marker=dict(size=6),
-                        hovertemplate="<b>Opponent</b>: %{y:.2f} pts<br>Time: %{x}<extra></extra>",
+                        hovertemplate=f"<b>{opp_name}</b>: %{{y:.2f}} pts<br>Time: %{{x}}<extra></extra>",
                     )
                 )
 
-                # Layout: points on the right Y-axis, time along the X-axis
                 fig.update_layout(
-                    title=f"{summary['league_name']} — Live Score Progression",
+                    title=f"{summary['league_name']}: You vs. {opp_name}",
                     template="plotly_dark",
                     height=420,
                     xaxis=dict(
@@ -579,7 +662,7 @@ with tab_charts:
                     ),
                     yaxis=dict(
                         title="Fantasy Points",
-                        side="right",  # Points on the right side
+                        side="right",
                         showgrid=True,
                         gridcolor="rgba(255, 255, 255, 0.1)",
                     ),
