@@ -1,0 +1,14 @@
+sleeper:
+  username: "ejs0611"
+  leagues:
+    - id: "1391514779046125568"
+      name: "Your Mom's Keeper League"
+    - id: "1389750972284149760"
+      name: "Work League"
+    - id: "1389724269306466304"
+      name: "National Bozo League"
+
+app:
+  refresh_interval_seconds: 20
+  auto_detect_week: true
+  manual_week_override: null # Set to an integer (e.g. 2) to override auto-detection
